@@ -1,5 +1,5 @@
 import { App, Component, MarkdownRenderer, Notice, TFile } from "obsidian";
-
+import mermaid from 'mermaid';
 import ADFBuilder from "lib/builder/adf";
 import {
 	AdfElement,
@@ -18,7 +18,17 @@ export default class FileAdaptor {
 		private readonly client: ConfluenceClient,
 		private readonly spaceId: string,
 		private readonly settings: ConfluenceLinkSettings
-	) {}
+	) {
+		// Initialize mermaid with specific configuration
+		mermaid.initialize({
+			startOnLoad: false,
+			theme: 'default',
+			securityLevel: 'loose',
+			fontFamily: 'arial',
+			htmlLabels: true,
+			fontSize: 16
+		});
+	}
 
 	async convertObs2Adf(text: string, path: string): Promise<AdfElement[]> {
 		const container = document.createElement("div");
@@ -87,6 +97,48 @@ export default class FileAdaptor {
 		return confluenceUrl as string;
 	}
 
+	private async convertMermaidToImage(mermaidCode: string, pageId: string): Promise<string | null> {
+		try {
+			// Generate unique ID for the diagram
+			const id = 'mermaid-' + Math.random().toString(36).substr(2, 9);
+
+			// Render mermaid diagram to SVG string
+			const { svg } = await mermaid.render(id, mermaidCode);
+
+			// Create a temporary div to hold the SVG
+			const div = document.createElement('div');
+			div.innerHTML = svg;
+			const svgElement = div.firstElementChild as SVGElement;
+
+			// Set SVG attributes for proper sizing
+			svgElement.setAttribute('width', '1200');
+			svgElement.setAttribute('height', '800');
+			svgElement.setAttribute('style', 'background-color: white;');
+
+			// Convert SVG to string with XML declaration
+			const svgString = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' +
+				new XMLSerializer().serializeToString(svgElement);
+
+			// Create blob and form data
+			const svgBlob = new Blob([svgString], { type: 'image/svg+xml' });
+			const formData = new FormData();
+			const filename = `mermaid-${Date.now()}.svg`;
+			formData.append('file', new File([svgBlob], filename, { type: 'image/svg+xml' }));
+
+			// Upload SVG directly to Confluence
+			const attachmentResponse = await this.client.attachement.uploadFile(pageId, formData);
+
+			if (attachmentResponse?.results[0]?.extensions) {
+				return attachmentResponse.results[0].extensions.fileId;
+			}
+
+			return null;
+		} catch (error) {
+			console.error('Error in convertMermaidToImage:', error);
+			return null;
+		}
+	}
+
 	async traverse(node: HTMLElement, builder: ADFBuilder, filePath: string) {
 		switch (node.nodeName) {
 			case "H1":
@@ -134,12 +186,38 @@ export default class FileAdaptor {
 				break;
 			case "PRE":
 				const codeElement = node.querySelector("code");
-				if (
-					codeElement &&
-					!codeElement.classList.contains("language-yaml")
-				) {
+				if (codeElement) {
 					const codeText = codeElement.textContent || "";
-					builder.addItem(builder.codeBlockItem(codeText));
+					const language = Array.from(codeElement.classList)
+						.find(cls => cls.startsWith('language-'))
+						?.replace('language-', '');
+
+					if (language === 'mermaid') {
+						try {
+							const file = this.app.vault.getAbstractFileByPath(filePath);
+							
+							if (file instanceof TFile) {
+								const fileData = await this.app.vault.read(file);
+								const propAdaptor = new PropertiesAdaptor().loadProperties(fileData);
+								const pageId = propAdaptor.properties.pageId as string;
+								
+								if (pageId) {
+									const fileId = await this.convertMermaidToImage(codeText, pageId);
+									if (fileId) {
+										// Add the image to the Confluence page with original size
+										builder.addItem(builder.mediaSingleItem(fileId, "attachment", "wide"));
+										break;
+									}
+								}
+							}
+						} catch (error) {
+							console.error('Error processing mermaid diagram:', error);
+						}
+					}
+					
+					if (!codeElement.classList.contains("language-yaml")) {
+						builder.addItem(builder.codeBlockItem(codeText));
+					}
 				}
 				break;
 			case "P":
@@ -154,7 +232,6 @@ export default class FileAdaptor {
 					node as HTMLParagraphElement,
 					filePath
 				);
-
 				break;
 			case "OL":
 			case "UL":
