@@ -148,6 +148,7 @@ class ParagraphDirector {
 							this.fileAdaptor
 						).findLink(_node as HTMLAnchorElement);
 						marks.push(this.builder.markLink(link));
+						break;  // Added missing break statement
 					case "STRONG":
 						marks.push(this.builder.markStrong());
 						break;
